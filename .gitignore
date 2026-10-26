@@ -1,0 +1,17 @@
+.venv/
+
+*.pyc
+__pycache__/
+db.sqlite3
+*.env
+*/migrations/*
+settings_local.py
+
+*.log
+*.DS_Store
+Thumbs.db
+ehthumbs.db
+coverage/
+.vscode/
+.idea/
+venv/   
