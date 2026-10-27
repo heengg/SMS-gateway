@@ -19,4 +19,8 @@ from django.urls import path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    
+    path('api/sms/send', send_sms_view, name='send_sms'),
+    path('api/sms/logs', sms_logs_view, name='sms_logs'),
+    path('api/routes/health', routes_health_view, name='routes_health'),
 ]
