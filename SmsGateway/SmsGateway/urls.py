@@ -17,7 +17,10 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
-from sms.views import send_sms_view, sms_logs_view, routes_health_view
+# from sms.views import register_view, send_sms_view, sms_logs_view, routes_health_view
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from sms.views import register_view, send_sms_view, sms_logs_view, routes_health_view
+
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -25,7 +28,7 @@ urlpatterns = [
     path('api/auth/register', register_view, name='register'),
     path('api/auth/login', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/refresh', TokenRefreshView.as_view(), name='token_refresh'),
-    
+
     path('api/sms/send', send_sms_view, name='send_sms'),
     path('api/sms/logs', sms_logs_view, name='sms_logs'),
     path('api/routes/health', routes_health_view, name='routes_health'),
