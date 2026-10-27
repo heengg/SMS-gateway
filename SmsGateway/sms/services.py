@@ -1,23 +1,14 @@
-# sms/services.py
+import uuid
 import re
 from django.db import transaction
-from .models import SMSRoute, SMSLog
+from .models import SMSRoute, SMSLog, CreditLedger, SMSDeliveryAttempt
 from .phone_validation import validate
 from .encoding import countSmsParts
 
 def dispatch_bulk_sms_pipeline(user_obj, recipient_list: list, message_text: str) -> dict:
-    """
-    Core Business Logic Engine.
-    - Validates and normalizes phone lists.
-    - Locks the user's wallet via a safe database transaction block.
-    - Smart routes message text (selects transactional lanes for OTPs automatically).
-    - Executes failover routing across networks (Ncell vs NTC).
-    - Automatically executes precise refund logic for failed streams.
-    """
-    # 1. Trigger our custom validation module
     clean_phones = []
     invalid_phones = []
-    
+
     for num in recipient_list:
         try:
             clean_phones.append(validate(num))
@@ -26,101 +17,120 @@ def dispatch_bulk_sms_pipeline(user_obj, recipient_list: list, message_text: str
 
     if invalid_phones:
         return {"success": False, "error_type": "ValidationError", "details": invalid_phones}
+    if not clean_phones:
+        return {"success": False, "error": "No valid phone numbers provided"}
 
-    # 2. Analyze the character footprint metrics
+    # 2. Analyze Message
+    # Note: Ensure your countSmsParts returns a tuple (encoding, parts) or adjust this unpacking
     encoding_type, segments_count = countSmsParts(message_text)
     
-    # 3. Smart Routing Selection: Look for critical verification intent context
-    # If the message matches an OTP/Login blueprint, force transactional paths first
-    is_otp = bool(re.search(r'(otp|verification|verify|code|login|password)', message_text, re.IGNORECASE))
-    target_route_type = 'transactional' if is_otp else 'promotional'
-
-    # Fetch and rank available routes
-    available_routes = list(
-        SMSRoute.objects.filter(is_active=True)
-        .order_by('priority')
-    )
+    # 3. Get Routes
+    available_routes = list(SMSRoute.objects.filter(is_active=True).order_by('priority'))
     
-    # Prioritize the matched route type (transactional vs promotional)
-    sorted_routes = sorted(available_routes, key=lambda r: 0 if r.route_type == target_route_type else 1)
+    if not available_routes:
+        return {"success": False, "error": "No active routes available."}
 
-    if not sorted_routes:
-        return {"success": False, "error": "No active communication gateway routes are available."}
+    # 4. Calculate Cost Safely
+    # FIX: Use the MOST EXPENSIVE route for the upfront hold to prevent negative balances on fallback
+    max_cost_per_segment = max(route.cost_per_segment for route in available_routes)
+    max_possible_cost = len(clean_phones) * segments_count * max_cost_per_segment
 
-    # 5. Open an isolated atomic database transaction block to prevent overspending
-    # Satisfies the requirement: 20 parallel requests fired simultaneously at 10 credits worth of balance
+    # Generate a single ID for this entire bulk request (for idempotency & ledger)
+    request_id = uuid.uuid4()
+
+    # 5. Atomic Wallet Deduction & Ledger Creation
     with transaction.atomic():
-        # select_for_update() locks this unique row in the database until this block finishes executing
         user_wallet = user_obj.wallet.select_for_update().get()
         
-        # Calculate maximum possible upfront cost assuming the top-priority route's cost footprint
-        primary_route = sorted_orutes[0]
-        max_possible_cost = len(clean_phones) * segments_count * primary_route.cost_per_segment
-        
         if user_wallet.balance < max_possible_cost:
-            raise ValueError(f"Insufficient wallet balance. Needed: {max_possible_cost}, Available: {user_wallet.balance}")
+            raise ValueError(f"Insufficient balance. Needed: {max_possible_cost}, Available: {user_wallet.balance}")
 
-        # Deduct the cost upfront before releasing control to external network simulators
         user_wallet.balance -= max_possible_cost
-        user_wallet.save()
+        user_wallet.save(update_fields=['balance', 'updated_at'])
 
-    # 6. Dispatch Loop & Fallback Routing Chain
+        # Create the immutable audit trail
+        CreditLedger.objects.create(
+            user=user_obj, wallet=user_wallet, request_id=request_id,
+            amount=-max_possible_cost, entry_type="DEBIT",
+            balance_after=user_wallet.balance,
+            description=f"Bulk SMS debit for {len(clean_phones)} recipients"
+        )
+
+        # Create pending logs for all recipients
+        for phone in clean_phones:
+            SMSLog.objects.create(
+                request_id=request_id, user=user_obj, recipient_phone_number=phone,
+                message_body=message_text, encoding_type=encoding_type,
+                segments_count=segments_count, credit_cost=0, status='pending'
+            )
+
+    # 6. Lock Routes Safely (Prevents Deadlocks under parallel load)
+    # We lock all relevant routes at once, ordered by ID, to guarantee consistent lock acquisition
+    route_ids = [r.id for r in available_routes]
+    locked_routes_map = {
+        r.id: r for r in SMSRoute.objects.filter(id__in=route_ids).select_for_update().order_by('id')
+    }
+
+    # 7. Dispatch Loop & Failover
     successful_logs = []
     failed_logs = []
     actual_credits_spent = 0
 
-    for phone in clean_phones:
-        sms_delivered = False
-        route_attempted = None
-        
-        # Initialize a base audit trail tracking record row in our system
-        log_entry = SMSLog.objects.create(
-            user=user_obj,
-            recipient_phone_number=phone,
-            message_body=message_text,
-            encoding_type=encoding_type,
-            segments_count=segments_count,
-            credit_cost=0, # Will be set dynamically based on the route that actually succeeds
-            status='pending'
-        )
+    # Fetch the logs we just created for this request
+    logs_to_process = SMSLog.objects.filter(request_id=request_id, status='pending')
 
-        # Fallback mechanism: Attempt routes sequentially by priority if one crashes
-        for route in sorted_routes:
-            route_attempted = route
-            # Use select_for_update to lock route balances so parallel tasks don't overdraw provider inventory
-            with transaction.atomic():
-                locked_route = SMSRoute.objects.select_for_update().get(id=route.id)
+    for log_entry in logs_to_process:
+        sms_delivered = False
+        
+        for route in available_routes:
+            locked_route = locked_routes_map[route.id]
+            
+            # Record the attempt (Success OR Failure) for the Health Endpoint
+            attempt_success = locked_route.send_sms(log_entry.recipient_phone_number, message_text, segments=segments_count)
+            
+            SMSDeliveryAttempt.objects.create(
+                log=log_entry, route=locked_route, 
+                success=attempt_success, 
+                error_message="" if attempt_success else "Simulated provider failure"
+            )
+
+            if attempt_success:
+                # Decrement provider balance safely
+                locked_route.route_balance -= segments_count
+                locked_route.save(update_fields=['route_balance'])
                 
-                # Check model internal simulation engine function
-                if locked_route.send_sms(phone, message_text):
-                    sms_delivered = True
-                    # Calculate dynamic structural cost based on this specific lane's pricing constraint
-                    final_cost = segments_count * locked_route.cost_per_segment
-                    actual_credits_spent += final_cost
-                    
-                    # Update audit log entry state
-                    log_entry.route_used = locked_route
-                    log_entry.credit_cost = final_cost
-                    log_entry.status = 'sent'
-                    log_entry.save()
-                    break # Success! Break the inner route fallback loop, move to next phone number
+                # Update Log
+                final_cost = segments_count * locked_route.cost_per_segment
+                log_entry.route_used = locked_route
+                log_entry.credit_cost = final_cost
+                log_entry.status = 'sent'
+                log_entry.save(update_fields=['route_used', 'credit_cost', 'status'])
+                
+                actual_credits_spent += final_cost
+                successful_logs.append(log_entry.recipient_phone_number)
+                sms_delivered = True
+                break # Move to next phone
 
         if not sms_delivered:
             log_entry.status = 'failed'
-            log_entry.save()
-            failed_logs.append(phone)
-        else:
-            successful_logs.append(phone)
+            log_entry.save(update_fields=['status'])
+            failed_logs.append(log_entry.recipient_phone_number)
 
-    # 7. Refund Layer (Requirement 06)
-    # If our actual spend is less than the max cost deducted upfront (or if items failed), give credits back!
+    # 8. Refund Layer
     refund_amount = max_possible_cost - actual_credits_spent
     
     if refund_amount > 0:
         with transaction.atomic():
             refund_wallet = user_obj.wallet.select_for_update().get()
             refund_wallet.balance += refund_amount
-            refund_wallet.save()
+            refund_wallet.save(update_fields=['balance', 'updated_at'])
+            
+            CreditLedger.objects.create(
+                user=user_obj, wallet=refund_wallet, request_id=request_id,
+                amount=refund_amount, entry_type="REFUND",
+                balance_after=refund_wallet.balance,
+                description=f"Refund for {len(failed_logs)} failed messages + overcharge adjustment"
+            )
 
     return {
         "success": True,
