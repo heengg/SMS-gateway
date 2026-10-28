@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "NestSms@2026" # Must meet MSSQL complexity rules
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      - DB_NAME=nest_sms
+      - DB_USER=sa
+      - DB_PASSWORD=NestSms@2026
+      - DB_HOST=db
+      - DB_PORT=1433
+
+volumes:
+  mssql_data:

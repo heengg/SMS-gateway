@@ -31,7 +31,7 @@ class SMSRoute(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('provider', 'route_type')
+        unique_together = ('provider', 'route_name')
         constraints = [
             CheckConstraint(
                 check=Q(route_balance__gte=0),
@@ -138,7 +138,7 @@ class SMSLog(models.Model):
     message_body = models.TextField()
     encoding_type = models.CharField(max_length=10) # e.g., 'GSM-7' or 'Unicode'
     segments_count = models.IntegerField()
-    credit_cost = models.IntegerField()
+    credit_cost = models.IntegerField(default=0)
     status = models.CharField(
         max_length=10, choices=STATUS_CHOICES, default="pending", db_index=True
     )
