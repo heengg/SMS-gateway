@@ -91,6 +91,7 @@ def dispatch_bulk_sms_pipeline(user_obj, recipient_list: list, message_text: str
         for log_entry in logs_to_process:
             sms_delivered = False
             
+            # FAILOVER LOOP:
             for route in available_routes:
                 locked_route = locked_routes_map[route.id]
                 

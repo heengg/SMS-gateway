@@ -9,17 +9,22 @@ from django.core.paginator import Paginator
 
 # DRF Imports for JWT
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.throttling import UserRateThrottle
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .services import dispatch_bulk_sms_pipeline
 from .models import SMSLog, SMSRoute, SMSDeliveryAttempt, Wallet
 
+class SMSRateThrottle(UserRateThrottle):
+    scope = 'user'
+
 @api_view(['POST'])
 @permission_classes([]) # Anyone can register
 def register_view(request):
     username = request.data.get('username')
     password = request.data.get('password')
+    
     if not username or not password:
         return Response({"error": "Username and password required"}, status=400)
     
@@ -30,8 +35,11 @@ def register_view(request):
     Wallet.objects.create(user=user, balance=100) # Give them 100 starter credits
     return Response({"success": True, "message": "User registered. Wallet created with 100 credits."}, status=201)
 
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+# @throttle_classes([SMSRateThrottle])
 def send_sms_view(request):
     """POST /api/sms/send"""
     recipients = request.data.get("to")
