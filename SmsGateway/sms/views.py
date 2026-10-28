@@ -47,8 +47,10 @@ def send_sms_view(request):
         return Response({"success": True, "data": result}, status=201)
     except ValueError as val_err:
         return Response({"success": False, "error": str(val_err)}, status=400)
-    except Exception:
-        return Response({"success": False, "error": "Internal Server Error"}, status=500)
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc()) # This prints the full error to your terminal
+        return Response({"success": False, "error": str(e)}, status=500) # This shows it in Postman
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

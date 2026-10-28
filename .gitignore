@@ -16,7 +16,7 @@ coverage/
 .idea/
 venv/   
 Testing/
-# phone_validation.py
 arch.md
 django_readme.md
-service.py  
+service.py
+viewD.py  

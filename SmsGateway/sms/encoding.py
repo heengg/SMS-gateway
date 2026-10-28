@@ -18,7 +18,7 @@ GSM_BASIC = set(
 
 GSM_EXTENDED = set("\f^{}\\[~]|€")
 
-def countSmsParts(messageText):
+def countSmsParts(message_text):
     if not message_text:
         return SmsSegmentResult(encoding="GSM-7", parts=0, effective_length=0)
     
